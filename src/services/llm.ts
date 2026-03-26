@@ -139,6 +139,8 @@ export const llmService = {
     };
 
     try {
+      let page: any = null;
+
       await emitProgress({ percent: 3, stage: '正在创建提取任务' });
       const startResponse = await fetch('/api/backend/extract-url/start', {
         method: 'POST',
@@ -146,43 +148,56 @@ export const llmService = {
         body: JSON.stringify({ url })
       });
 
-      if (!startResponse.ok) {
-        throw await buildHttpError(startResponse);
-      }
-
-      const { jobId } = await startResponse.json();
-      if (!jobId) {
-        throw new Error('创建提取任务失败：缺少任务 ID');
-      }
-
-      let page: any = null;
-      while (!page) {
-        const statusResponse = await fetch(`/api/backend/extract-url/status/${jobId}`);
-        if (!statusResponse.ok) {
-          throw await buildHttpError(statusResponse);
+      if (startResponse.ok) {
+        const { jobId } = await startResponse.json();
+        if (!jobId) {
+          throw new Error('创建提取任务失败：缺少任务 ID');
         }
 
-        const status = await statusResponse.json();
-        await emitProgress({
-          percent: Math.min(70, Math.max(5, status.percent || 5)),
-          stage: status.message || '正在提取网页内容'
+        while (!page) {
+          const statusResponse = await fetch(`/api/backend/extract-url/status/${jobId}`);
+          if (!statusResponse.ok) {
+            throw await buildHttpError(statusResponse);
+          }
+
+          const status = await statusResponse.json();
+          await emitProgress({
+            percent: Math.min(70, Math.max(5, status.percent || 5)),
+            stage: status.message || '正在提取网页内容'
+          });
+
+          if (status.failed) {
+            throw new Error(status.error?.message || '网页提取失败');
+          }
+
+          if (!status.done) {
+            await sleep(220);
+            continue;
+          }
+
+          const resultResponse = await fetch(`/api/backend/extract-url/result/${jobId}`);
+          if (!resultResponse.ok) {
+            throw await buildHttpError(resultResponse);
+          }
+
+          page = await resultResponse.json();
+        }
+      } else if (startResponse.status === 404 || startResponse.status === 405) {
+        await emitProgress({ percent: 25, stage: '当前环境不支持分阶段提取，切换为直连提取模式' }, 800);
+        const extractResponse = await fetch('/api/backend/extract-url', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
         });
 
-        if (status.failed) {
-          throw new Error(status.error?.message || '网页提取失败');
+        if (!extractResponse.ok) {
+          throw await buildHttpError(extractResponse);
         }
 
-        if (!status.done) {
-          await sleep(220);
-          continue;
-        }
-
-        const resultResponse = await fetch(`/api/backend/extract-url/result/${jobId}`);
-        if (!resultResponse.ok) {
-          throw await buildHttpError(resultResponse);
-        }
-
-        page = await resultResponse.json();
+        page = await extractResponse.json();
+        await emitProgress({ percent: 70, stage: '网页提取完成' });
+      } else {
+        throw await buildHttpError(startResponse);
       }
 
       const codeBlockSection =
